@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  docx2pdf:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./temp:/tmp/docx2pdf_output
+      - ./fonts:/tmp/fonts
+    environment:
+      - FLASK_ENV=production
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
