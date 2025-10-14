@@ -8,6 +8,6 @@ curl -X POST http://localhost:8080/convert \
         "name": "Arial"
       }
     ],
-    "output_filename": "output.pdf"
+    "output_filename": "custom_output.pdf"
   }' \
-  -o docx_to_pdf.pdf
+  -o custom_output.pdf

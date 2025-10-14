@@ -1,34 +1,67 @@
-from flask import Flask, request, jsonify, send_file  # pyright: ignore[reportMissingImports]
-from werkzeug.utils import secure_filename  # pyright: ignore[reportMissingImports]
+from fastapi import FastAPI, Request, File, UploadFile, Form, HTTPException, Depends  # pyright: ignore[reportMissingImports]
+from fastapi.responses import FileResponse # pyright: ignore[reportMissingImports]
+from fastapi.middleware.cors import CORSMiddleware # pyright: ignore[reportMissingImports]
+from pydantic import BaseModel # pyright: ignore[reportMissingImports]
 import os
 import tempfile
 import uuid
 from pathlib import Path
 import logging
-from converter import DocxToPdfConverter
 import traceback
+from typing import List, Optional
+import json
+
+from src.infrastructure.di_container import di_container
+from src.presentation.controllers import DocumentController
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
+app = FastAPI(
+    title="DOCX to PDF Converter",
+    description="A service to convert DOCX documents to PDF format",
+    version="1.0.0"
+)
 
-# Initialize converter
-converter = DocxToPdfConverter()
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-@app.route('/health', methods=['GET'])
-def health_check():
+# Initialize dependency injection container
+container = di_container()
+
+# Get document controller from container
+document_controller = container.get(DocumentController)
+
+# Pydantic models for request/response validation
+class FontUrl(BaseModel):
+    url: str
+    name: str
+
+class ConvertRequest(BaseModel):
+    docx_url: str
+    font_urls: List[FontUrl] = []
+    output_filename: Optional[str] = None
+
+class HealthResponse(BaseModel):
+    status: str
+    service: str
+    version: str
+
+@app.get("/health")
+async def health_check():
     """Health check endpoint"""
-    return jsonify({
-        "status": "healthy",
-        "service": "docx2pdf-converter",
-        "version": "1.0.0"
-    })
+    response = document_controller.health_check()
+    return response
 
-@app.route('/convert', methods=['POST'])
-def convert_docx_to_pdf():
+@app.post("/convert")
+async def convert_docx_to_pdf(request: ConvertRequest):
     """
     Convert DOCX to PDF endpoint
     
@@ -45,79 +78,40 @@ def convert_docx_to_pdf():
     }
     """
     try:
-        # Validate request
-        if not request.is_json:
-            return jsonify({
-                "error": "Content-Type must be application/json"
-            }), 400
+        # Convert Pydantic model to dict for the controller
+        data = request.model_dump()
         
-        data = request.get_json()
+        # Set default output filename if not provided
+        if not data.get('output_filename'):
+            data['output_filename'] = f"converted_{uuid.uuid4().hex[:8]}.pdf"
         
-        # Validate required fields
-        if 'docx_url' not in data:
-            return jsonify({
-                "error": "Missing required field: docx_url"
-            }), 400
+        # Call the controller method
+        result = document_controller.convert_docx_to_pdf(data)
         
-        docx_url = data['docx_url']
-        font_urls = data.get('font_urls', [])
-        output_filename = data.get('output_filename', f"converted_{uuid.uuid4().hex[:8]}.pdf")
-        
-        # Validate URL format
-        if not docx_url.startswith(('http://', 'https://')):
-            return jsonify({
-                "error": "Invalid docx_url format. Must be a valid HTTP/HTTPS URL"
-            }), 400
-        
-        # Validate font_urls format
-        if font_urls:
-            for font_info in font_urls:
-                if not isinstance(font_info, dict) or 'url' not in font_info or 'name' not in font_info:
-                    return jsonify({
-                        "error": "Invalid font_urls format. Each font must have 'url' and 'name' fields"
-                    }), 400
-        
-        # Create output directory
-        output_dir = Path(tempfile.gettempdir()) / "docx2pdf_output"
-        output_dir.mkdir(exist_ok=True)
-        
-        # Generate unique output path
-        pdf_path = output_dir / secure_filename(output_filename)
-        
-        logger.info(f"Starting conversion: {docx_url} -> {pdf_path}")
-        
-        # Perform conversion
-        success = converter.convert_from_url(
-            docx_url=docx_url,
-            pdf_path=str(pdf_path),
-            font_urls=font_urls
-        )
-        
-        if success and pdf_path.exists():
-            logger.info(f"Conversion successful: {pdf_path}")
-            
-            # Return PDF file
-            return send_file(
-                str(pdf_path),
-                as_attachment=True,
-                download_name=output_filename,
-                mimetype='application/pdf'
-            )
+        # Check if result is a tuple (error case) or file path (success case)
+        if isinstance(result, tuple):
+            response, status_code = result
+            raise HTTPException(status_code=status_code, detail=response.get("error", "Conversion failed"))
         else:
-            logger.error(f"Conversion failed for {docx_url}")
-            return jsonify({
-                "error": "Conversion failed. Please check the DOCX URL and try again."
-            }), 500
+            # result is a file path (success case)
+            return FileResponse(
+                path=result,
+                filename=data['output_filename'],
+                media_type='application/pdf'
+            )
             
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({
-            "error": f"Internal server error: {str(e)}"
-        }), 500
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-@app.route('/convert-file', methods=['POST'])
-def convert_uploaded_file():
+@app.post("/convert-file")
+async def convert_uploaded_file(
+    file: UploadFile = File(...),
+    font_urls: Optional[str] = Form(None)
+):
     """
     Convert uploaded DOCX file to PDF
     
@@ -126,147 +120,62 @@ def convert_uploaded_file():
     - font_urls: JSON string (optional)
     """
     try:
-        # Check if file is present
-        if 'file' not in request.files:
-            return jsonify({
-                "error": "No file provided"
-            }), 400
-        
-        file = request.files['file']
-        
-        if file.filename == '':
-            return jsonify({
-                "error": "No file selected"
-            }), 400
-        
         # Validate file extension
         if not file.filename.lower().endswith('.docx'):
-            return jsonify({
-                "error": "File must be a DOCX file"
-            }), 400
+            raise HTTPException(status_code=400, detail="File must be a DOCX file")
         
         # Parse font URLs if provided
-        font_urls = []
-        if 'font_urls' in request.form:
+        font_urls_list = []
+        if font_urls:
             try:
-                import json
-                font_urls = json.loads(request.form['font_urls'])
+                font_urls_list = json.loads(font_urls)
             except json.JSONDecodeError:
-                return jsonify({
-                    "error": "Invalid font_urls JSON format"
-                }), 400
+                raise HTTPException(status_code=400, detail="Invalid font_urls JSON format")
         
         # Save uploaded file temporarily
         with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as temp_file:
-            file.save(temp_file.name)
+            content = await file.read()
+            temp_file.write(content)
             temp_docx_path = temp_file.name
         
         try:
-            # Create output directory
-            output_dir = Path(tempfile.gettempdir()) / "docx2pdf_output"
-            output_dir.mkdir(exist_ok=True)
-            
             # Generate output filename
             original_name = Path(file.filename).stem
             pdf_filename = f"{original_name}_converted.pdf"
-            pdf_path = output_dir / pdf_filename
             
-            logger.info(f"Converting uploaded file: {file.filename}")
+            # Prepare data for controller
+            data = {
+                'docx_path': temp_docx_path,
+                'font_urls': font_urls_list,
+                'output_filename': pdf_filename
+            }
             
-            # Perform conversion
-            success = converter.convert_docx_to_pdf(
-                docx_path=temp_docx_path,
-                pdf_path=str(pdf_path),
-                font_urls=font_urls
-            )
+            # Call the controller method
+            result = document_controller.convert_uploaded_file(data)
             
-            if success and pdf_path.exists():
-                logger.info(f"Conversion successful: {pdf_path}")
-                
-                # Return PDF file
-                return send_file(
-                    str(pdf_path),
-                    as_attachment=True,
-                    download_name=pdf_filename,
-                    mimetype='application/pdf'
-                )
+            # Check if result is a tuple (error case) or file path (success case)
+            if isinstance(result, tuple):
+                response, status_code = result
+                raise HTTPException(status_code=status_code, detail=response.get("error", "Conversion failed"))
             else:
-                logger.error(f"Conversion failed for {file.filename}")
-                return jsonify({
-                    "error": "Conversion failed. Please check the DOCX file and try again."
-                }), 500
+                # result is a file path (success case)
+                return FileResponse(
+                    path=result,
+                    filename=pdf_filename,
+                    media_type='application/pdf'
+                )
                 
         finally:
             # Clean up temporary file
             if os.path.exists(temp_docx_path):
                 os.unlink(temp_docx_path)
                 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         logger.error(traceback.format_exc())
-        return jsonify({
-            "error": f"Internal server error: {str(e)}"
-        }), 500
-
-@app.route('/fonts/preview', methods=['POST'])
-def preview_fonts():
-    """
-    Preview available fonts and their URLs
-    """
-    try:
-        data = request.get_json()
-        font_urls = data.get('font_urls', [])
-        
-        preview_results = []
-        
-        for font_info in font_urls:
-            font_url = font_info.get('url')
-            font_name = font_info.get('name')
-            
-            try:
-                # Try to download font
-                font_path = converter.download_font(font_url, font_name)
-                preview_results.append({
-                    "name": font_name,
-                    "url": font_url,
-                    "status": "available",
-                    "path": font_path
-                })
-            except Exception as e:
-                preview_results.append({
-                    "name": font_name,
-                    "url": font_url,
-                    "status": "error",
-                    "error": str(e)
-                })
-        
-        return jsonify({
-            "fonts": preview_results
-        })
-        
-    except Exception as e:
-        logger.error(f"Font preview error: {str(e)}")
-        return jsonify({
-            "error": f"Font preview failed: {str(e)}"
-        }), 500
-
-@app.errorhandler(413)
-def too_large(e):
-    return jsonify({
-        "error": "File too large. Maximum size is 50MB."
-    }), 413
-
-@app.errorhandler(404)
-def not_found(e):
-    return jsonify({
-        "error": "Endpoint not found"
-    }), 404
-
-@app.errorhandler(500)
-def internal_error(e):
-    return jsonify({
-        "error": "Internal server error"
-    }), 500
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 if __name__ == '__main__':
     # Create output directory
@@ -275,9 +184,11 @@ if __name__ == '__main__':
     
     logger.info("Starting DOCX to PDF converter service...")
     logger.info("Available endpoints:")
+    logger.info("  GET /health - Health check")
     logger.info("  POST /convert - Convert DOCX from URL to PDF")
     logger.info("  POST /convert-file - Convert uploaded DOCX file to PDF")
-    logger.info("  POST /fonts/preview - Preview font availability")
-    logger.info("  GET /health - Health check")
+    logger.info("  GET /docs - API documentation (Swagger UI)")
+    logger.info("  GET /redoc - Alternative API documentation")
     
-    app.run(host='0.0.0.0', port=8080, debug=True)
+    import uvicorn  # pyright: ignore[reportMissingImports]
+    uvicorn.run(app, host='0.0.0.0', port=8080, log_level='info')

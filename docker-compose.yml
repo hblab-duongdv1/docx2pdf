@@ -1,19 +1,21 @@
-version: '3.8'
-
 services:
   docx2pdf:
-    build: .
+    container_name: docx2pdf-service
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
       - "8080:8080"
     volumes:
       - ./temp:/tmp/docx2pdf_output
       - ./fonts:/tmp/fonts
     environment:
-      - FLASK_ENV=production
-      - PYTHONUNBUFFERED=1
+      PYTHONUNBUFFERED: 1
+      PYTHONDONTWRITEBYTECODE: 1
+      PATH: /root/.local/bin:$PATH
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -45,18 +45,3 @@ echo "📁 Creating directories..."
 mkdir -p temp
 mkdir -p output
 mkdir -p logs
-
-# Make test script executable
-chmod +x test_converter.py
-
-echo ""
-echo "🎉 Setup completed successfully!"
-echo ""
-echo "To start the server:"
-echo "  source venv/bin/activate"
-echo "  python app.py"
-echo ""
-echo "To run tests:"
-echo "  python test_converter.py"
-echo ""
-echo "Server will be available at: http://localhost:8080"
